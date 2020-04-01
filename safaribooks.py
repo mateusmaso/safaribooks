@@ -268,7 +268,7 @@ class SafariBooks:
                   "<dc:language>en-US</dc:language>\n" \
                   "<dc:date>{7}</dc:date>\n" \
                   "<dc:identifier id=\"bookid\">{0}</dc:identifier>\n" \
-                  "<meta name=\"cover\" content=\"{8}\"/>\n" \
+                  "<meta name=\"cover\" content=\"cover-image\"/>\n" \
                   "</metadata>\n" \
                   "<manifest>\n" \
                   "<item id=\"ncx\" href=\"toc.ncx\" media-type=\"application/x-dtbncx+xml\" />\n" \
@@ -375,7 +375,7 @@ class SafariBooks:
         if not self.cover:
             self.cover = self.get_default_cover()
             cover_html = self.parse_html(
-                html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), True
+                html.fromstring("<div id=\"sbo-rt-content\"><img src=\"Images/{0}\"></div>".format(self.cover)), [], True
             )
 
             self.book_chapters = [{
@@ -530,6 +530,10 @@ class SafariBooks:
         if "last_chapter_read" in response:
             del response["last_chapter_read"]
 
+        for key, value in response.items():
+            if value is None:
+                response[key] = 'n/a'
+
         return response
 
     def get_book_chapters(self, page=1):
@@ -638,7 +642,7 @@ class SafariBooks:
 
         return None
 
-    def parse_html(self, root, first_page=False):
+    def parse_html(self, root, stylesheet_urls, first_page=False):
         if random() > 0.8:
             if len(root.xpath("//div[@class='controls']/a/text()")):
                 self.display.exit(self.display.api_error(" "))
@@ -652,8 +656,9 @@ class SafariBooks:
 
         page_css = ""
         stylesheet_links = root.xpath("//link[@rel='stylesheet']")
+        stylesheet_count = 0
+
         if len(stylesheet_links):
-            stylesheet_count = 0
             for s in stylesheet_links:
                 css_url = urljoin("https:", s.attrib["href"]) if s.attrib["href"][:2] == "//" \
                     else urljoin(self.base_url, s.attrib["href"])
@@ -666,6 +671,19 @@ class SafariBooks:
                             "rel=\"stylesheet\" type=\"text/css\" />\n".format(stylesheet_count)
                 stylesheet_count += 1
 
+        if len(stylesheet_urls):
+            for s_url in stylesheet_urls:
+                css_url = urljoin("https:", s_url) if s_url[:2] == "//" \
+                    else urljoin(self.base_url, s_url)
+
+                if css_url not in self.css:
+                    self.css.append(css_url)
+                    self.display.log("Crawler: found a new CSS at %s" % css_url)
+
+                page_css += "<link href=\"Styles/Style{0:0>2}.css\" " \
+                            "rel=\"stylesheet\" type=\"text/css\" />\n".format(stylesheet_count)
+                stylesheet_count += 1
+        
         stylesheets = root.xpath("//style")
         if len(stylesheets):
             for css in stylesheets:
@@ -808,7 +826,8 @@ class SafariBooks:
                     self.display.book_ad_info = 2
 
             else:
-                self.save_page_html(self.parse_html(self.get_html(next_chapter["web_url"]), first_page))
+                stylesheet_urls = list(map(lambda s: s["url"], next_chapter["stylesheets"]))
+                self.save_page_html(self.parse_html(self.get_html(next_chapter["content"]), next_chapter["site_styles"] + stylesheet_urls, first_page))
 
             self.display.state(len_books, len_books - len(self.chapters_queue))
 
@@ -874,13 +893,8 @@ class SafariBooks:
     def collect_css(self):
         self.display.state_status.value = -1
 
-        if "win" in sys.platform:
-            # TODO
-            for css_url in self.css:
-                self._thread_download_css(css_url)
-
-        else:
-            self._start_multiprocessing(self._thread_download_css, self.css)
+        for css_url in self.css:
+            self._thread_download_css(css_url)
 
     def collect_images(self):
         if self.display.book_ad_info == 2:
@@ -891,13 +905,8 @@ class SafariBooks:
 
         self.display.state_status.value = -1
 
-        if "win" in sys.platform:
-            # TODO
-            for image_url in self.images:
-                self._thread_download_images(image_url)
-
-        else:
-            self._start_multiprocessing(self._thread_download_images, self.images)
+        for image_url in self.images:
+            self._thread_download_images(image_url)
 
     def create_content_opf(self):
         self.css = next(os.walk(self.css_path))[2]
@@ -925,6 +934,9 @@ class SafariBooks:
             manifest.append("<item id=\"style_{0:0>2}\" href=\"Styles/Style{0:0>2}.css\" "
                             "media-type=\"text/css\" />".format(i))
 
+        res = self.create_cover()
+        manifest.append("<item id=\"cover-image\" href=\"{0}\" media-type=\"image/png\" properties=\"cover-image\" />".format(res))
+
         authors = "\n".join("<dc:creator opf:file-as=\"{0}\" opf:role=\"aut\">{0}</dc:creator>".format(
             escape(aut["name"])
         ) for aut in self.book_info["authors"])
@@ -946,6 +958,27 @@ class SafariBooks:
             "\n".join(spine),
             self.book_chapters[0]["filename"].replace(".html", ".xhtml")
         )
+
+    def create_cover(self):
+        response = self.requests_provider(self.api_url)
+        parsed = response.json()
+        for i in parsed['chapters']:
+            # very vulnerable as publishers may differ
+            if 'cover.' or 'Cover.' or 'titlepage.' in i:
+                cover_url = i
+                break
+
+        if cover_url:
+            cover_response = self.requests_provider(cover_url)
+            cover_parsed = cover_response.json()
+            imgAttrib = cover_parsed['images']
+            if imgAttrib:
+                lst2str = "".join(list(map(str, imgAttrib)))
+                return "Images/" + lst2str.split('/')[-1]
+            else:
+                return "Images/" + self.get_default_cover()
+        else: 
+            return "Images/" + self.get_default_cover()
 
     @staticmethod
     def parse_toc(l, c=0, mx=0):
